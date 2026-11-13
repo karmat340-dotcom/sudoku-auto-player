@@ -46,7 +46,14 @@ class SudokuAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow
         if (root != null) {
             val words = mutableListOf<String>(); collect(root, words); root.recycle()
-            val s = words.joinToString(" ").lowercase()\n            if ((s.contains("skip") || s.contains("close ad") || s.contains("close")) && (s.contains("ad") || s.contains("skip") || s.contains("close ad"))) {\n                if (tapLabel("skip", "close ad", "close")) { status("Dismissed visible ad close/skip control."); handler.postDelayed(task,900); return }\n            }
+            val s = words.joinToString(" ").lowercase()
+            if ((s.contains("skip") || s.contains("close ad")) && (s.contains("ad") || s.contains("skip"))) {
+                if (tapLabel("skip", "close ad")) {
+                    status("Dismissed visible ad close/skip control.")
+                    handler.postDelayed(task, 900)
+                    return
+                }
+            }
             if (s.contains("excellent") || s.contains("well done") || s.contains("congratulations")) {
                 status("Puzzle complete. Starting another Easy game.")
                 if (tapLabel("new game", "play again")) handler.postDelayed({ tapLabel("easy"); handler.postDelayed({ capture() }, 1000) }, 1000)
@@ -109,7 +116,6 @@ class SudokuAccessibilityService : AccessibilityService() {
             if (b[row][c]==0) { b[row][c]=t.toInt(); clues++ }
         }
         if (clues<25) { status("Only $clues grid clues detected (need at least 25). No taps made; checking screen alignment."); handler.postDelayed({capture()},1800); return }
-        if (!seenKeys.all { it }) { status("Could not identify all nine keypad buttons. No taps made."); handler.postDelayed({capture()},2500); return }
         val solved=SudokuSolver.solve(b)
         if (solved==null) { status("Puzzle OCR gave conflicting clues. No numbers entered; retrying."); handler.postDelayed({capture()},1800); return }
         puzzle=Array(9){b[it].clone()}; answer=solved
