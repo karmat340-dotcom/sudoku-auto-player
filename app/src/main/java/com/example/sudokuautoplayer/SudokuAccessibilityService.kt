@@ -96,23 +96,59 @@ class SudokuAccessibilityService : AccessibilityService() {
         for (label in labels) {
             val matches = root.findAccessibilityNodeInfosByText(label)
             for (node in matches) {
-                val exact = node.text?.toString()?.trim()?.equals(label, ignoreCase = true) == true ||
-                    node.contentDescription?.toString()?.trim()?.equals(label, ignoreCase = true) == true
+                val nodeText = node.text?.toString()?.trim()
+                val nodeDescription = node.contentDescription?.toString()?.trim()
+                val exact = nodeText?.equals(label, ignoreCase = true) == true ||
+                    nodeDescription?.equals(label, ignoreCase = true) == true
+
                 if (exact) {
-                    var target: AccessibilityNodeInfo? = node
+                    // First try the normal accessibility click on this node or a clickable parent.
+                    var target: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(node)
+                    var tapped = false
                     while (target != null) {
-                        if (target.isClickable && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                            node.recycle()
-                            matches.filter { it !== node }.forEach { it.recycle() }
-                            return true
+                        val parent = target.parent
+                        if (target.isClickable &&
+                            target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                            tapped = true
+                            parent?.recycle()
+                            target.recycle()
+                            break
                         }
-                        target = target.parent
+                        target.recycle()
+                        target = parent
                     }
+
+                    // Some games draw buttons on a custom canvas: their text is visible,
+                    // but no clickable accessibility node exists. In that case tap the
+                    // centre of the labelled text bounds as a fallback.
+                    if (!tapped) {
+                        val bounds = android.graphics.Rect()
+                        node.getBoundsInScreen(bounds)
+                        if (!bounds.isEmpty && bounds.width() > 0 && bounds.height() > 0) {
+                            tapped = dispatchTap(
+                                bounds.exactCenterX(),
+                                bounds.exactCenterY()
+                            )
+                        }
+                    }
+
+                    matches.forEach { it.recycle() }
+                    return tapped
                 }
-                node.recycle()
             }
+            matches.forEach { it.recycle() }
         }
         return false
+    }
+
+    private fun dispatchTap(x: Float, y: Float): Boolean {
+        val path = Path().apply {
+            moveTo(x, y)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 90))
+            .build()
+        return dispatchGesture(gesture, null, null)
     }
 
     private fun scheduleRescan() {
