@@ -95,7 +95,7 @@ class SudokuAccessibilityService : AccessibilityService() {
         // Calibrated against the supplied Unico Sudoku gameplay screenshot.
         gridX=w*0.0104f; gridY=h*0.1973f; gridW=w*0.9792f; gridH=h*0.4604f
         keyY=h*0.839f
-        for (c in 0..8) keyX[c]=w*(0.057f+c*0.1108f)
+        for (c in 0..8) keyX[c]=w*(0.064f+c*0.109f)
         val b=Array(9){IntArray(9)}; var clues=0
         for (line in lines) {
             val r=line.boundingBox ?: continue
