@@ -21,7 +21,7 @@ class SudokuAccessibilityService : AccessibilityService() {
     @Volatile private var running = false
     @Volatile private var busy = false
     private var gridX = 0f; private var gridY = 0f; private var gridW = 0f; private var gridH = 0f
-    private val keyY = FloatArray(9)
+    private var keyY = 0f
     private val keyX = FloatArray(9)
     private var puzzle = Array(9) { IntArray(9) }
     private var answer = Array(9) { IntArray(9) }
@@ -46,7 +46,7 @@ class SudokuAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow
         if (root != null) {
             val words = mutableListOf<String>(); collect(root, words); root.recycle()
-            val s = words.joinToString(" ").lowercase()
+            val s = words.joinToString(" ").lowercase()\n            if ((s.contains("skip") || s.contains("close ad") || s.contains("close")) && (s.contains("ad") || s.contains("skip") || s.contains("close ad"))) {\n                if (tapLabel("skip", "close ad", "close")) { status("Dismissed visible ad close/skip control."); handler.postDelayed(task,900); return }\n            }
             if (s.contains("excellent") || s.contains("well done") || s.contains("congratulations")) {
                 status("Puzzle complete. Starting another Easy game.")
                 if (tapLabel("new game", "play again")) handler.postDelayed({ tapLabel("easy"); handler.postDelayed({ capture() }, 1000) }, 1000)
@@ -94,19 +94,9 @@ class SudokuAccessibilityService : AccessibilityService() {
     private fun readBoard(w: Int, h: Int, lines: List<com.google.mlkit.vision.text.Text.Line>) {
         // Calibrated against the supplied Unico Sudoku gameplay screenshot.
         gridX=w*0.0104f; gridY=h*0.1940f; gridW=w*0.9792f; gridH=h*0.4520f
-        // Calibrate every keypad key from its OCR bounding box, not guessed coordinates.
-        val seenKeys = BooleanArray(9)
-        for (line in lines) {
-            val t=line.text.trim()
-            val box=line.boundingBox ?: continue
-            if (t.length==1 && t[0] in '1'..'9' &&
-                box.centerY() > gridY+gridH+h*0.08f && box.centerY() < h*0.93f) {
-                val n=t.toInt()-1
-                keyX[n]=box.exactCenterX().toFloat()
-                keyY[n]=box.exactCenterY().toFloat()
-                seenKeys[n]=true
-            }
-        }
+        // Stable keypad centres calibrated from the supplied 832x1790 game screen.
+        keyY=h*0.839f
+        for (i in 0..8) keyX[i]=w*(0.065f+i*0.1085f)
         val b=Array(9){IntArray(9)}; var clues=0
         for (line in lines) {
             val r=line.boundingBox ?: continue
@@ -135,7 +125,7 @@ class SudokuAccessibilityService : AccessibilityService() {
         val (r,c)=blanks[pos]; val n=answer[r][c]
         tap(gridX+(c+0.5f)*gridW/9f, gridY+(r+0.5f)*gridH/9f) {
             handler.postDelayed({
-                tap(keyX[n-1],keyY[n-1]) {
+                tap(keyX[n-1],keyY) {
                     pos++
                     if(pos%10==0 || pos==blanks.size) status("Entering numbers: $pos/${blanks.size}")
                     handler.postDelayed({enterCell()},120)
