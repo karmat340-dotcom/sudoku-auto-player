@@ -96,42 +96,46 @@ class SudokuAccessibilityService : AccessibilityService() {
         for (label in labels) {
             val matches = root.findAccessibilityNodeInfosByText(label)
             for (node in matches) {
-                val nodeText = node.text?.toString()?.trim()
-                val nodeDescription = node.contentDescription?.toString()?.trim()
-                val exact = nodeText?.equals(label, ignoreCase = true) == true ||
-                    nodeDescription?.equals(label, ignoreCase = true) == true
+                val nodeText = node.text?.toString().orEmpty()
+                val nodeDescription = node.contentDescription?.toString().orEmpty()
+                // findAccessibilityNodeInfosByText may return a parent/container whose
+                // text contains the label rather than an exact text-only node.
+                val matchesLabel = nodeText.contains(label, ignoreCase = true) ||
+                    nodeDescription.contains(label, ignoreCase = true)
+                if (!matchesLabel) continue
 
-                if (exact) {
-                    // First try the normal accessibility click on this node or a clickable parent.
-                    var target: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(node)
-                    var tapped = false
-                    while (target != null) {
-                        val parent = target.parent
-                        if (target.isClickable &&
-                            target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                            tapped = true
-                            parent?.recycle()
-                            target.recycle()
-                            break
-                        }
-                        target.recycle()
-                        target = parent
+                // Try click on the matching node and each ancestor first.
+                var target: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(node)
+                while (target != null) {
+                    val parent = target.parent
+                    val clicked = target.isClickable &&
+                        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    target.recycle()
+                    if (clicked) {
+                        parent?.recycle()
+                        matches.forEach { it.recycle() }
+                        return true
                     }
+                    target = parent
+                }
 
-                    // Some games draw buttons on a custom canvas: their text is visible,
-                    // but no clickable accessibility node exists. In that case tap the
-                    // centre of the labelled text bounds as a fallback.
-                    if (!tapped) {
-                        val bounds = android.graphics.Rect()
-                        node.getBoundsInScreen(bounds)
-                        if (!bounds.isEmpty && bounds.width() > 0 && bounds.height() > 0) {
-                            tapped = dispatchTap(
-                                bounds.exactCenterX(),
-                                bounds.exactCenterY()
-                            )
-                        }
+                // Custom-rendered games may expose text but no clickable node.
+                // Walk upward to find the largest useful visible bounds and tap its centre.
+                var boundsNode: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(node)
+                var tapBounds = android.graphics.Rect()
+                while (boundsNode != null) {
+                    val candidate = android.graphics.Rect()
+                    boundsNode.getBoundsInScreen(candidate)
+                    if (!candidate.isEmpty && candidate.width() > 2 && candidate.height() > 2) {
+                        tapBounds = candidate
                     }
-
+                    val parent = boundsNode.parent
+                    boundsNode.recycle()
+                    boundsNode = parent
+                    if (!tapBounds.isEmpty && boundsNode == null) break
+                }
+                if (!tapBounds.isEmpty) {
+                    val tapped = dispatchTap(tapBounds.exactCenterX(), tapBounds.exactCenterY())
                     matches.forEach { it.recycle() }
                     return tapped
                 }
