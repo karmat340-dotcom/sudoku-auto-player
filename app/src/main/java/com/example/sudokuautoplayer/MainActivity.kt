@@ -59,7 +59,7 @@ class MainActivity : AppCompatActivity() {
         addButton("Stop") { SudokuAccessibilityService.requestStop(); status.text = "Stop requested." }
         layout.addView(TextView(this).apply {
             textSize = 13f
-            text = "Current build can recognize labelled game menus and select New Game / Easy when those controls are exposed by Android. Automatic 9×9 board reading, solving-in-game and keypad entry are not finished yet. Ads are never clicked."
+            text = "Uses on-device OCR to read the 9×9 puzzle, solve it, and enter missing digits through the keypad. Keep the full game board visible. Ads are never clicked."
         })
         setContentView(layout)
     }
