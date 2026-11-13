@@ -2,187 +2,181 @@ package com.example.sudokuautoplayer
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.graphics.Bitmap
 import android.graphics.Path
+import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.util.Log
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 
-/**
- * Text-driven navigation for the Unico Studio Sudoku game.
- * It deliberately clicks only visible, labelled controls; it never guesses screen coordinates.
- */
 class SudokuAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
-    @Volatile private var mode = Mode.STOPPED
-    private var lastActionAt = 0L
-    private var lastScreen = ""
-    private enum class Mode { STOPPED, RUNNING, PAUSED }
+    private val ocr by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+    @Volatile private var running = false
+    @Volatile private var busy = false
+    private var gridX = 0f; private var gridY = 0f; private var gridW = 0f; private var gridH = 0f
+    private var keyY = 0f
+    private val keyX = FloatArray(9)
+    private var puzzle = Array(9) { IntArray(9) }
+    private var answer = Array(9) { IntArray(9) }
+    private val blanks = mutableListOf<Pair<Int, Int>>()
+    private var pos = 0
 
     override fun onServiceConnected() {
         instance = this
-        publish("Accessibility service connected. Open Sudoku, then tap Start.")
+        status("Accessibility connected. Open Sudoku, then press Start.")
     }
-
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (mode != Mode.RUNNING || event == null) return
-        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
-        handler.removeCallbacks(scanTask)
-        handler.postDelayed(scanTask, 700)
-    }
-
-    private val scanTask = Runnable { inspectScreen() }
-
-    private fun inspectScreen() {
-        if (mode != Mode.RUNNING) return
-        val root = rootInActiveWindow ?: run { publish("Waiting for the game screen…"); return }
-        val labels = mutableListOf<String>()
-        collectText(root, labels)
-        val screen = labels.joinToString(" | ").lowercase()
-        if (screen == lastScreen) return
-        lastScreen = screen
-        Log.d("SudokuAuto", "Visible UI: $screen")
-
-        // Completion screen: start the next Easy game only when the completion label is visible.
-        if (screen.contains("excellent") || screen.contains("well done") || screen.contains("congratulations")) {
-            publish("Puzzle completed. Looking for New Game…")
-            if (clickLabel(root, listOf("new game", "play again"))) scheduleRescan()
-            else publish("Puzzle completed, but New Game control was not accessible.")
-            return
-        }
-
-        // Difficulty selector: choose Easy by its exact visible label.
-        if (screen.contains("easy") && (screen.contains("medium") || screen.contains("hard") || screen.contains("difficulty"))) {
-            publish("Difficulty menu found. Selecting Easy…")
-            if (clickLabel(root, listOf("easy"))) scheduleRescan()
-            else publish("Easy option is visible but not clickable.")
-            return
-        }
-
-        // Home screen: begin a new game.
-        if (screen.contains("new game")) {
-            publish("Game menu found. Starting a new game…")
-            if (clickLabel(root, listOf("new game"))) scheduleRescan()
-            else publish("New Game is visible but not clickable.")
-            return
-        }
-
-        if (screen.contains("sudoku") || screen.contains("hint") || screen.contains("erase")) {
-            publish("Sudoku board detected. Board reading and cell entry are not implemented yet; automation paused safely.")
-            mode = Mode.PAUSED
-            return
-        }
-
-        // Ads are not interacted with automatically. Only report what is visible.
-        if (screen.contains("install") || screen.contains("learn more") || screen.contains("advertisement")) {
-            publish("An ad screen is visible. No ad content will be clicked.")
-            return
-        }
-        publish("Running. Waiting for a recognized Sudoku screen…")
-    }
-
-    private fun collectText(node: AccessibilityNodeInfo, out: MutableList<String>) {
-        node.text?.toString()?.takeIf { it.isNotBlank() }?.let(out::add)
-        node.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let(out::add)
-        for (i in 0 until node.childCount) node.getChild(i)?.let { child ->
-            collectText(child, out)
-            child.recycle()
+        if (!running || busy || event == null) return
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            handler.removeCallbacks(task); handler.postDelayed(task, 800)
         }
     }
+    private val task = Runnable { inspect() }
 
-    private fun clickLabel(root: AccessibilityNodeInfo, labels: List<String>): Boolean {
-        for (label in labels) {
-            val matches = root.findAccessibilityNodeInfosByText(label)
-            for (node in matches) {
-                val nodeText = node.text?.toString().orEmpty()
-                val nodeDescription = node.contentDescription?.toString().orEmpty()
-                // findAccessibilityNodeInfosByText may return a parent/container whose
-                // text contains the label rather than an exact text-only node.
-                val matchesLabel = nodeText.contains(label, ignoreCase = true) ||
-                    nodeDescription.contains(label, ignoreCase = true)
-                if (!matchesLabel) continue
+    private fun inspect() {
+        if (!running || busy) return
+        val root = rootInActiveWindow
+        if (root != null) {
+            val words = mutableListOf<String>(); collect(root, words); root.recycle()
+            val s = words.joinToString(" ").lowercase()
+            if (s.contains("excellent") || s.contains("well done") || s.contains("congratulations")) {
+                status("Puzzle complete. Starting another Easy game.")
+                if (tapLabel("new game", "play again")) handler.postDelayed({ tapLabel("easy"); handler.postDelayed({ capture() }, 1000) }, 1000)
+                return
+            }
+            if (s.contains("new game")) {
+                status("Starting a new game.")
+                if (tapLabel("new game")) handler.postDelayed({ tapLabel("easy"); handler.postDelayed({ capture() }, 1000) }, 1000)
+                else status("New Game is visible but Android exposes no tap target. Trying screen OCR.")
+                if (s.contains("easy")) handler.postDelayed({ capture() }, 1500)
+                return
+            }
+            if (s.contains("easy") && (s.contains("medium") || s.contains("hard") || s.contains("difficulty"))) {
+                if (tapLabel("easy")) handler.postDelayed({ capture() }, 1000)
+                else status("Could not tap Easy; retrying.")
+                return
+            }
+        }
+        capture()
+    }
+    private fun collect(n: AccessibilityNodeInfo, out: MutableList<String>) {
+        n.text?.toString()?.takeIf { it.isNotBlank() }?.let(out::add)
+        n.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let(out::add)
+        for (i in 0 until n.childCount) { val c=n.getChild(i) ?: continue; collect(c,out); c.recycle() }
+    }
 
-                // Try click on the matching node and each ancestor first.
-                var target: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(node)
-                while (target != null) {
-                    val parent = target.parent
-                    val clicked = target.isClickable &&
-                        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    target.recycle()
-                    if (clicked) {
-                        parent?.recycle()
-                        matches.forEach { it.recycle() }
-                        return true
-                    }
-                    target = parent
+    private fun capture() {
+        if (!running || busy) return
+        if (Build.VERSION.SDK_INT < 30) { status("Screen OCR requires Android 11+."); return }
+        busy = true
+        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+            override fun onSuccess(s: ScreenshotResult) {
+                val bmp = try { Bitmap.wrapHardwareBuffer(s.hardwareBuffer, s.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false) } catch (_: Exception) { null }
+                s.hardwareBuffer.close()
+                if (bmp == null) { busy=false; status("Could not capture game screen."); return }
+                ocr.process(InputImage.fromBitmap(bmp,0))
+                    .addOnSuccessListener { result -> readBoard(bmp.width,bmp.height,result.textBlocks.flatMap { it.lines }) }
+                    .addOnFailureListener { status("OCR error: " + (it.message ?: "unknown")) }
+                    .addOnCompleteListener { bmp.recycle(); busy=false }
+            }
+            override fun onFailure(code: Int) { busy=false; status("Screen capture failed ($code). Check accessibility permission.") }
+        })
+    }
+
+    private fun readBoard(w: Int, h: Int, lines: List<com.google.mlkit.vision.text.Text.Line>) {
+        // Calibrated against the supplied Unico Sudoku gameplay screenshot.
+        gridX=w*0.0104f; gridY=h*0.1973f; gridW=w*0.9792f; gridH=h*0.4604f
+        keyY=h*0.839f
+        for (c in 0..8) keyX[c]=w*(0.057f+c*0.1108f)
+        val b=Array(9){IntArray(9)}; var clues=0
+        for (line in lines) {
+            val r=line.boundingBox ?: continue
+            val x=r.exactCenterX(); val y=r.exactCenterY()
+            if (x<gridX || x>=gridX+gridW || y<gridY || y>=gridY+gridH) continue
+            val t=line.text.trim()
+            if (t.length!=1 || t[0] !in '1'..'9') continue
+            val c=((x-gridX)/(gridW/9f)).toInt().coerceIn(0,8)
+            val row=((y-gridY)/(gridH/9f)).toInt().coerceIn(0,8)
+            if (b[row][c]==0) { b[row][c]=t.toInt(); clues++ }
+        }
+        if (clues<12) { status("Only $clues clues detected. Keep the complete puzzle grid visible; no taps made."); return }
+        val solved=SudokuSolver.solve(b)
+        if (solved==null) { status("Puzzle OCR gave conflicting clues. No numbers entered; retrying."); handler.postDelayed({capture()},1800); return }
+        puzzle=Array(9){b[it].clone()}; answer=solved
+        blanks.clear()
+        for(r in 0..8) for(c in 0..8) if(puzzle[r][c]==0) blanks.add(r to c)
+        pos=0; status("Read $clues clues and solved the puzzle. Entering ${blanks.size} numbers.")
+        handler.postDelayed({ enterCell() },350)
+    }
+
+    private fun enterCell() {
+        if(!running) return
+        if(pos>=blanks.size) { status("All numbers entered. Checking completion…"); handler.postDelayed({capture()},1800); return }
+        val (r,c)=blanks[pos]; val n=answer[r][c]
+        tap(gridX+(c+0.5f)*gridW/9f, gridY+(r+0.5f)*gridH/9f) {
+            handler.postDelayed({
+                tap(keyX[n-1],keyY) {
+                    pos++
+                    if(pos%10==0 || pos==blanks.size) status("Entering numbers: $pos/${blanks.size}")
+                    handler.postDelayed({enterCell()},120)
                 }
+            },100)
+        }
+    }
 
-                // Custom-rendered games may expose text but no clickable node.
-                // Walk upward to find the largest useful visible bounds and tap its centre.
-                var boundsNode: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(node)
-                var tapBounds = android.graphics.Rect()
-                while (boundsNode != null) {
-                    val candidate = android.graphics.Rect()
-                    boundsNode.getBoundsInScreen(candidate)
-                    if (!candidate.isEmpty && candidate.width() > 2 && candidate.height() > 2) {
-                        tapBounds = candidate
+    private fun tapLabel(vararg labels:String):Boolean {
+        val root=rootInActiveWindow ?: return false
+        try {
+            for(label in labels) {
+                val nodes=root.findAccessibilityNodeInfosByText(label)
+                for(node in nodes) {
+                    val txt=node.text?.toString().orEmpty()+node.contentDescription?.toString().orEmpty()
+                    if(!txt.contains(label,true)) { node.recycle(); continue }
+                    var cur:AccessibilityNodeInfo?=AccessibilityNodeInfo.obtain(node)
+                    while(cur!=null) {
+                        if(cur.isClickable && cur.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                            cur.recycle(); node.recycle(); return true
+                        }
+                        val p=cur.parent; cur.recycle(); cur=p
                     }
-                    val parent = boundsNode.parent
-                    boundsNode.recycle()
-                    boundsNode = parent
-                    if (!tapBounds.isEmpty && boundsNode == null) break
-                }
-                if (!tapBounds.isEmpty) {
-                    val tapped = dispatchTap(tapBounds.exactCenterX(), tapBounds.exactCenterY())
-                    matches.forEach { it.recycle() }
-                    return tapped
+                    val rect=Rect(); node.getBoundsInScreen(rect); node.recycle()
+                    if(!rect.isEmpty) return tap(rect.exactCenterX(),rect.exactCenterY())
                 }
             }
-            matches.forEach { it.recycle() }
-        }
+        } finally { root.recycle() }
         return false
     }
-
-    private fun dispatchTap(x: Float, y: Float): Boolean {
-        val path = Path().apply {
-            moveTo(x, y)
-        }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 90))
-            .build()
-        return dispatchGesture(gesture, null, null)
+    private fun tap(x:Float,y:Float,done:(()->Unit)?=null):Boolean {
+        val p=Path().apply{moveTo(x,y)}
+        val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,75)).build()
+        return dispatchGesture(g,object:GestureResultCallback(){
+            override fun onCompleted(gestureDescription:GestureDescription?){done?.invoke()}
+            override fun onCancelled(gestureDescription:GestureDescription?){status("Tap cancelled. Paused to prevent wrong entries."); running=false}
+        },handler)
     }
-
-    private fun scheduleRescan() {
-        lastActionAt = System.currentTimeMillis()
-        handler.postDelayed({ lastScreen = ""; inspectScreen() }, 1200)
+    private fun status(s:String) {
+        getSharedPreferences("automation",MODE_PRIVATE).edit().putString("status",s).apply()
+        sendBroadcast(android.content.Intent(ACTION_STATUS).setPackage(packageName).putExtra("status",s))
     }
-
-    private fun publish(message: String) {
-        getSharedPreferences("automation", MODE_PRIVATE).edit().putString("status", message).apply()
-        sendBroadcast(android.content.Intent(ACTION_STATUS).setPackage(packageName).putExtra("status", message))
-    }
-
-    override fun onInterrupt() { mode = Mode.PAUSED; publish("Interrupted / paused.") }
-    override fun onDestroy() { instance = null; super.onDestroy() }
-
-    private fun startAutomation() {
-        mode = Mode.RUNNING
-        lastScreen = ""
-        publish("Started. Open Unico Studio Sudoku to begin.")
-        handler.post(scanTask)
-    }
-    private fun pauseAutomation() { mode = Mode.PAUSED; publish("Paused.") }
-    private fun stopAutomation() { mode = Mode.STOPPED; handler.removeCallbacksAndMessages(null); publish("Stopped.") }
-
+    override fun onInterrupt(){running=false;status("Paused by Android.")}
+    override fun onDestroy(){instance=null;ocr.close();super.onDestroy()}
+    private fun start(){running=true;status("Started. Reading Sudoku screen…");handler.post(task)}
+    private fun pause(){running=false;status("Paused.")}
+    private fun stop(){running=false;handler.removeCallbacksAndMessages(null);status("Stopped.")}
     companion object {
-        const val ACTION_STATUS = "com.example.sudokuautoplayer.STATUS"
-        @Volatile private var instance: SudokuAccessibilityService? = null
-        fun requestStart() { instance?.startAutomation() }
-        fun requestPause() { instance?.pauseAutomation() }
-        fun requestStop() { instance?.stopAutomation() }
-        fun isConnected() = instance != null
+        const val ACTION_STATUS="com.example.sudokuautoplayer.STATUS"
+        @Volatile private var instance:SudokuAccessibilityService?=null
+        fun requestStart(){instance?.start()}
+        fun requestPause(){instance?.pause()}
+        fun requestStop(){instance?.stop()}
+        fun isConnected()=instance!=null
     }
 }
