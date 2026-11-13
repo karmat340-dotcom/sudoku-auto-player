@@ -21,7 +21,7 @@ class SudokuAccessibilityService : AccessibilityService() {
     @Volatile private var running = false
     @Volatile private var busy = false
     private var gridX = 0f; private var gridY = 0f; private var gridW = 0f; private var gridH = 0f
-    private var keyY = 0f
+    private val keyY = FloatArray(9)
     private val keyX = FloatArray(9)
     private var puzzle = Array(9) { IntArray(9) }
     private var answer = Array(9) { IntArray(9) }
@@ -93,9 +93,20 @@ class SudokuAccessibilityService : AccessibilityService() {
 
     private fun readBoard(w: Int, h: Int, lines: List<com.google.mlkit.vision.text.Text.Line>) {
         // Calibrated against the supplied Unico Sudoku gameplay screenshot.
-        gridX=w*0.0104f; gridY=h*0.1973f; gridW=w*0.9792f; gridH=h*0.4604f
-        keyY=h*0.839f
-        for (c in 0..8) keyX[c]=w*(0.064f+c*0.109f)
+        gridX=w*0.0104f; gridY=h*0.1940f; gridW=w*0.9792f; gridH=h*0.4520f
+        // Calibrate every keypad key from its OCR bounding box, not guessed coordinates.
+        val seenKeys = BooleanArray(9)
+        for (line in lines) {
+            val t=line.text.trim()
+            val box=line.boundingBox ?: continue
+            if (t.length==1 && t[0] in '1'..'9' &&
+                box.centerY() > gridY+gridH+h*0.08f && box.centerY() < h*0.93f) {
+                val n=t.toInt()-1
+                keyX[n]=box.exactCenterX().toFloat()
+                keyY[n]=box.exactCenterY().toFloat()
+                seenKeys[n]=true
+            }
+        }
         val b=Array(9){IntArray(9)}; var clues=0
         for (line in lines) {
             val r=line.boundingBox ?: continue
@@ -107,7 +118,8 @@ class SudokuAccessibilityService : AccessibilityService() {
             val row=((y-gridY)/(gridH/9f)).toInt().coerceIn(0,8)
             if (b[row][c]==0) { b[row][c]=t.toInt(); clues++ }
         }
-        if (clues<12) { status("Only $clues clues detected. Keep the complete puzzle grid visible; no taps made."); return }
+        if (clues<25) { status("Only $clues grid clues detected (need at least 25). No taps made; checking screen alignment."); handler.postDelayed({capture()},1800); return }
+        if (!seenKeys.all { it }) { status("Could not identify all nine keypad buttons. No taps made."); handler.postDelayed({capture()},2500); return }
         val solved=SudokuSolver.solve(b)
         if (solved==null) { status("Puzzle OCR gave conflicting clues. No numbers entered; retrying."); handler.postDelayed({capture()},1800); return }
         puzzle=Array(9){b[it].clone()}; answer=solved
@@ -123,7 +135,7 @@ class SudokuAccessibilityService : AccessibilityService() {
         val (r,c)=blanks[pos]; val n=answer[r][c]
         tap(gridX+(c+0.5f)*gridW/9f, gridY+(r+0.5f)*gridH/9f) {
             handler.postDelayed({
-                tap(keyX[n-1],keyY) {
+                tap(keyX[n-1],keyY[n-1]) {
                     pos++
                     if(pos%10==0 || pos==blanks.size) status("Entering numbers: $pos/${blanks.size}")
                     handler.postDelayed({enterCell()},120)
